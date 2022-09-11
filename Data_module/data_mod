@@ -1,0 +1,165 @@
+
+import numpy as np
+import torch 
+import xarray as xr
+import pytorch_lightning as pl
+import pandas as pd
+
+from SiteDataMult import SiteData
+
+
+from torch.utils.data import Dataset, DataLoader
+from torch import Tensor
+from pytorch_lightning import LightningDataModule
+import netCDF4 as nc
+import xarray as xr
+import numpy as np
+import zarr
+from typing import List, Tuple, Dict, Union, Iterable
+
+from data_utils import Normalize
+
+
+class DataModule(pl.LightningDataModule):
+    def __init__(self, hparams,path:str , variables:List[str]):
+        super(DataModule, self).__init__()
+        
+        #self.hparams =  hparams #version 1.2.6
+        self.hparams.update(hparams) #version 1.5.8 pl
+        pl.seed_everything(self.hparams['seed']) #
+        
+        """ Reads a comma separated value file.
+            :path to a csv file.
+            
+            :return: inputs and output values
+            """
+       
+       
+
+# read multiple files (wildcard)
+
+        ## opening with mfdtaset causing data leakage unline opening with each dataset on its own
+        df=xr.open_dataset(path)
+        df=df.dropna(dim="Datetime",subset=["LW_OUT"]) ##  Measurements for LW out do not span over entire dataset
+        df1=np.unique(df.Datetime.dt.year)
+        tyear=np.random.choice(df1,1)
+        tyear1=tyear+1
+        tyear=str(tyear)[1:5]
+        tyear1=str(tyear1)[1:5]
+        self._test_ds=df.sel(Datetime=slice('{}-01-01'.format(tyear), '{}-12-31'.format(tyear1))) ## Ensuring test set has at least 2 fully covered years
+
+        df_res=df.drop(self._test_ds.Datetime,dim='Datetime')
+        if self._test_ds.Datetime.size <= 0.15 * df_res.Datetime.size : #and test_ds.Datetime.size>1
+            dflength = df_res.Datetime.size   
+            trainlength = round(df_res.Datetime.size *0.7)
+        
+            self._train_ds =  df_res.isel(Datetime=range(trainlength))
+            self._valid_ds = df_res.isel(Datetime=range(trainlength, dflength ))
+
+        else:  
+            len=round(df_res.Datetime.size*0.15) #removed *0.15 to keep 1 year
+            self._test_ds = self._test_ds.isel(Datetime=range(len))
+            df_res=df.drop(self._test_ds.Datetime,dim='Datetime')
+            dflength = df_res.Datetime.size   
+            trainlength = round(df_res.Datetime.size *0.7)
+       
+            self._train_ds =  df_res.isel(Datetime=range(trainlength))
+            self._valid_ds = df_res.isel(Datetime=range(trainlength, dflength ))
+          
+        self._variables = variables
+
+        
+         # Register normalization parameters from training data.
+        self._norm = Normalize()
+        self._norm.register_xr(self._train_ds, self._variables)
+        
+
+    def train_dataloader(self):
+        
+        data_train = SiteData(self._train_ds) 
+        
+        
+        return  DataLoader(data_train,
+                                batch_size=self.hparams['batch_size'],
+                                shuffle=True,
+                                num_workers=self.hparams['num_workers'])
+                                #drop_last=True)
+       
+
+    def val_dataloader(self):
+        
+        data_val = SiteData(self._valid_ds)
+        
+        return DataLoader(data_val,
+                                batch_size=self.hparams['batch_size'],
+                                #shuffle=True,
+                                num_workers=self.hparams['num_workers'])
+                                #drop_last=True)
+
+
+    def test_dataloader(self):
+        
+        data_test = SiteData(self._test_ds)
+        
+        return DataLoader(data_test,
+                                batch_size=self.hparams['batch_size'],
+                                num_workers=self.hparams['num_workers'])
+                                #drop_last=True)
+    def target_xr(
+            self,
+            mode: str,
+            varnames: Union[str, List[str]],
+            num_epochs: int = 1) -> xr.Dataset:
+        if mode not in ('train', 'valid', 'test'):
+            raise ValueError(
+                f'`mode` must be on of (`train` | `valid` | `test`), is `{mode}`.'
+            )
+
+        if mode == 'train':
+            ds = self._train_ds
+        elif mode == 'valid':
+            ds = self._valid_ds
+        elif mode == 'test':
+            ds = self._test_ds
+        else:
+            raise ValueError(
+                f'`mode` must be on of (`train` | `valid` | `test`), is `{mode}`.'
+            )
+
+        varnames = [varnames] if isinstance(varnames, str) else varnames
+
+        ds_new = ds[varnames]
+
+        for var in varnames:
+            var_new = var + '_pred'
+            dummy = ds[var].copy()
+            dummy.values[:] = np.nan
+            dummy = dummy.expand_dims(epoch=np.arange(num_epochs))
+            ds_new[var_new] = dummy.copy()
+
+        return ds_new
+
+
+
+    
+
+    def add_scalar_record(self, ds: xr.Dataset, varname: str, x: Iterable) -> xr.Dataset:
+
+        if isinstance(x, Tensor):
+            x = x.detach().cpu().numpy()
+
+        # Cut excess entries (NaNs).
+        x = x[:x.argmin()]
+
+        if 'iter' not in ds.coords:
+            ds = ds.assign_coords({'iter': np.arange(len(x))})
+        else:
+            if len(ds['iter']) != len(x):
+                raise ValueError(
+                    f'dimension `iter` already exists in `ds`, but length ({len(ds["iter"])}) does '
+                    f'not match length of `x` ({len(x)}).'
+                )
+
+        
+
+        return ds
