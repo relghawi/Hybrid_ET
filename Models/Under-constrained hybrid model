@@ -58,7 +58,7 @@ class Hybrid(pl.LightningModule):
         )
         
         self.hparams.update(hparams) 
-
+        pl.seed_everything(self.hparams['seed'])
         hidden_size1=self.hparams['hidden_size1']
         n_hidden_layers1=self.hparams['n_hidden_layers1']
         hidden_size2=self.hparams['hidden_size2']
