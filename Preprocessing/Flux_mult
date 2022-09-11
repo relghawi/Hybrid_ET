@@ -1,0 +1,142 @@
+import numpy as np
+import pandas as pd
+import xarray as xr
+from datetime import datetime
+from pandas import Grouper
+from torch.utils.data import Dataset
+from sympy import *
+import glob
+import os
+import zarr
+from typing import List, Tuple, Dict, Union, Iterable
+
+
+def premult(my_file_dir:str):
+
+    file_paths = glob.glob(my_file_dir+"/*.csv")
+    for fluxes in file_paths:
+        i=pd.read_csv(fluxes, parse_dates=True, infer_datetime_format=True )
+        i["DateTime"]=i["time"] #when getting Fluxsites with lat/long from R + readsites in py
+        i["siteID"]=i["site"]
+        i['Datetime'] = pd.to_datetime(i['DateTime'], format='%Y-%m-%d %H:%M:%S')
+        i["timeofday"] = i.Datetime.dt.hour + i.Datetime.dt.minute/60  ## done also when Fluxsites with lat/long from R + readsites in py
+        i["doy"]=i.Datetime.dt.dayofyear #same
+        i['Date'] = i.Datetime
+        i=i.set_index(["Datetime","siteID"]) #,"Latitude","Longitude"
+        i = i.to_xarray()
+
+    ##  converting LE, NETRAD, VPD
+        i["LE_CORR_o"] = i.LE_CORR  ###  W/m2 = J /m2/s
+        i["NETRAD_o"] = i.NETRAD   
+        i["G_o"]= i.G 
+        i["H_CORR_o"]= i.H_CORR
+        i["H_o"]= i.H
+
+    ##  converting LE, NETRAD, VPD
+        i["LE_CORR"] = i.LE_CORR * 0.0864 ### from W/m2 to MJ /m2/d
+        i["NETRAD"] = i.NETRAD * 0.0864  
+        i["G"]= i.G * 0.0864
+        i["H_CORR"]= i.H_CORR * 0.0864
+        i["H"]= i.H * 0.0864
+
+
+    ### Defining constants of PM eqn:
+
+        cp = 1004.834 # specific heat of air for constant pressure (J K-1 kg-1)
+        eps= 0.622  # ratio of the molecular weight of water vapor to dry air (=Mw/Md)
+        k1 = 2.501
+        k2 = 0.00237
+        ld = ( k1 - k2 * i.TA ) * 1e+06 #Latent heat of vaporization as a function of air temperature
+        Rd= 287.0586 # gas constant of dry air (J kg-1 K-1) (Foken 2008 p. 245)
+        rhoa = (i.PA*1000)/(Rd * (i.TA+273.15))
+        psicst  = (cp * i.PA) / (eps * ld) #psychrometric constant (kPa K-1)
+        x = Symbol('x')
+        a = 611.2
+        b = 17.62
+        c = 243.12
+        esat = a * exp((b * x) / (c + x)) / 1000   ## Saturation vapor pressure (kPa)
+        D = esat.diff(x)  #The slope of the Esat curve is calculated as the first derivative of the function
+        D = lambdify(x, D) 
+        delta=D(i.TA) #Slope of the saturation vapor pressure curve (kPa K-1)
+        i["delta"]= delta
+        Lv = 2453 * 1e6 # MJ m-3 used to convert from energy flux rate to volume flux rate ie. ET0 (mm/day)
+
+        ## Calculating T surface form Stefan-Boltzmann eqn
+        boltz_cst= 5.789 * 1e-8 # Boltzman constant W/m^2.K^4
+        emissivity=0.9
+        i["LW_Emis"]=i.LW_OUT/(boltz_cst*emissivity)
+        i["TSurf"] = np.power(i["LW_Emis"],(1/4)) ## surface temperature in Kelvin
+        i["TSurf"] = i["TSurf"] - 273.15 ## Ts in celcius
+
+        emissivity2=0.92
+        i["LW_Emis"]=i.LW_OUT/(boltz_cst*emissivity2)
+        i["TSurf2"] = np.power(i["LW_Emis"],(1/4)) ## surface temperature in Kelvin
+        i["TSurf2"] = i["TSurf2"] - 273.15 ## Ts in celcius        
+
+        emissivity4=0.94
+        i["LW_Emis"]=i.LW_OUT/(boltz_cst*emissivity4)
+        i["TSurf4"] = np.power(i["LW_Emis"],(1/4)) ## surface temperature in Kelvin
+        i["TSurf4"] = i["TSurf4"] - 273.15 ## Ts in celcius   
+
+        emissivity6=0.96
+        i["LW_Emis"]=i.LW_OUT/(boltz_cst*emissivity6)
+        i["TSurf6"] = np.power(i["LW_Emis"],(1/4)) ## surface temperature in Kelvin
+        i["TSurf6"] = i["TSurf6"] - 273.15 ## Ts in celcius   
+
+        emissivity8=0.98
+        i["LW_Emis"]=i.LW_OUT/(boltz_cst*emissivity8)
+        i["TSurf8"] = np.power(i["LW_Emis"],(1/4)) ## surface temperature in Kelvin
+        i["TSurf8"] = i["TSurf8"] - 273.15 ## Ts in celcius   
+
+
+        emissivity1=1
+        i["LW_Emis"]=i.LW_OUT/(boltz_cst*emissivity1)
+        i["TSurf1"] = np.power(i["LW_Emis"],(1/4)) ## surface temperature in Kelvin
+        i["TSurf1"] = i["TSurf1"] - 273.15 ## Ts in celcius 
+
+    ## Rs inv calcaulted (s/m)
+        gs_inv_bl_r= ( i.LE_CORR_o * (1/i.ra) * psicst ) / ( delta * (i.NETRAD_o-i.G_o) + rhoa * cp * (1/i.ra) * i.VPD - i.LE_CORR_o * ( delta + psicst ) )
+        rs= 1/gs_inv_bl_r
+        i["rs"]= rs
+
+        i["ET_FAO"]=i.LE_CORR*0.408 ##1 MJ /m2/day =0.408 mm /day .
+        dr = pd.date_range(str(np.datetime_as_string(i["Datetime"][0])),str(np.datetime_as_string(i["Datetime"][-1])), freq='0.5H')
+
+        my_years = xr.DataArray([t.year if (t.month==13) else (t.year + 1) for t in i.ET_FAO.indexes['Datetime']],
+                        dims='Datetime', name='my_years', coords={'Datetime': dr})
+        i['WD_in']= i.P -i.ET_FAO
+        i['WD_cum'] =i.WD_in.groupby(my_years).apply(lambda x: x.cumsum(dim='Datetime', skipna=True))
+        i['WD']= i.WD_cum / 48 ## mm/0.5hr
+
+    ## Selecting variables
+        i= i[['timeofday','Date','doy','PA','NIGHT',"LW_OUT","TSurf","TSurf2","TSurf4","TSurf6","TSurf8","TSurf1","PPFD_IN",'LE_QC','H_CORR','G','LE_CORR','LE_QC','NETRAD','NIGHT','P','SW_IN','SW_IN_POT','SW_POT_sm','rs', 'SW_POT_sm_diff','ra','TA','USTAR','VPD','WS','LE_CORR_o','NETRAD_o','G_o','H_CORR_o','delta', 'WD']]
+
+    ## Masking winter months (incl. months 3-10)
+
+        i = i.to_dataframe()
+        i["mask"]=np.nan
+        i['mask'] = np.where(i['Date'].dt.month.between(3,10), 1, i['mask']) ## non-winter months
+      
+        i = i.to_xarray()
+ 
+        i= i[['timeofday','doy','mask','PA',"PPFD_IN","LW_OUT","TSurf","TSurf2","TSurf4","TSurf6","TSurf8","TSurf1",'NIGHT','LE_QC','H_CORR','G','LE_CORR','LE_QC','NETRAD','NIGHT','P','SW_IN','SW_IN_POT','SW_POT_sm','rs', 'SW_POT_sm_diff','ra','TA','USTAR','VPD','WS','LE_CORR_o','NETRAD_o','G_o','H_CORR_o','delta', 'WD']]
+        
+        
+    ### Criteria for data plausibility and selection
+
+        i = i.where(i.LE_QC == 0, drop=True) # Quality check
+        i = i.where(i.rs > 0, drop=True)  # Physically realistic
+        i = i.where(i.rs < 2000, drop=True) # Physically realistic
+        i = i.where(i.ra < 500, drop=True) # Physically realistic
+        i = i.where(i.ra > 0, drop=True) # Physically realistic
+        i = i.where(i.LE_CORR_o > 0, drop=True) ## daytime values
+        i = i.where(i.NETRAD_o > 0, drop=True) ## daytime values
+        i = i.where(i.G_o > 0, drop=True) ## daytime values
+        i = i.where(i.VPD>0, drop=True) # Physically realistic
+        i = i.where(i.NIGHT == 0,drop=True) ## daytime values
+        i = i.where(i.H_CORR_o > 5,drop=True) ## daytime values
+        i = i.where(i.SW_IN > 50,drop=True) ## daytime values
+
+        
+   
+        i.to_netcdf('path/{}.nc'.format(os.path.basename(fluxes)[0:6]))
