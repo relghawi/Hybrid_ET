@@ -1,0 +1,238 @@
+"""Pure ML multilayer."""
+
+
+import xarray as xr
+import numpy as np
+from sympy import *
+from argparse import ArgumentParser
+from typing import List, Dict, Tuple
+from typing import Optional
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Function
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning import Trainer, seed_everything
+from data_utils import Normalize
+from Fed3 import MultiLinear
+from scipy import stats
+
+
+
+class MLLE(pl.LightningModule):
+    def __init__(
+            self,
+            hparams,
+            variables: List[str],
+            targets: List[str],
+            norm: Normalize,
+            ds_val: xr.Dataset,
+            ds_test:xr.Dataset,
+            ds_train:xr.Dataset,
+            hidden_size,
+            n_hidden_layers,
+            dropout
+            ) -> None:
+       
+
+        super(MLLE,self).__init__()
+        self.save_hyperparameters(
+            'hparams',
+            'variables',
+            'targets',
+            'hidden_size',
+            'n_hidden_layers',
+            'dropout'            
+        )
+        
+        
+        self.hparams.update(hparams) 
+        pl.seed_everything(self.hparams['seed'])
+
+        hidden_size=self.hparams['hidden_size1']
+        n_hidden_layers=self.hparams['n_hidden_layers1']
+ 
+          
+        dropout=self.hparams['dropout']        
+        self.variables = variables
+        self.targets = targets
+        self.input_norm = norm.get_normalization_layer(variables=self.variables, invert=False, stack=True)
+
+
+        self.nn = MultiLinear(
+            num_inputs=len(self.variables),
+            num_outputs=len(self.targets),
+            num_hidden=hidden_size,
+            num_layers=n_hidden_layers,
+            dropout=dropout,
+            dropout_last=False,
+            activation=nn.ReLU(),
+            activation_last=False
+        )
+
+        self.latent_denorm = norm.get_normalization_layer(variables=self.targets, invert=True, stack=True)
+
+
+        self.ds_val = ds_val
+        self.ds_test = ds_test
+        self.ds_train = ds_train
+
+
+
+        # for entries later generated during validation and testing
+        self.val_history = np.zeros(100000, dtype=np.float32) * np.nan
+        self.test_history = np.zeros(100000, dtype=np.float32) * np.nan
+        self.train_history = np.zeros(100000, dtype=np.float32) * np.nan
+
+        #self.Ts_history = np.zeros(100000, dtype=np.float32) * np.nan
+
+
+    def forward(self, batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        z = self.input_norm({x: batch[x] for x in["WS","G_o","VPD","NETRAD_o","WD","TA",'SW_IN','SW_POT_sm']})
+
+        #print(z_rs)
+        #print(z_ra)
+  
+        z = self.nn(z)
+
+
+       # denormalization done for latent
+        
+        LE_hat = self.latent_denorm(z)
+
+
+        LE_hat = F.softplus(LE_hat)
+
+
+
+        LE_hat=LE_hat.squeeze(1)
+
+
+        return LE_hat
+
+
+
+    def shared_step(self,i): #shared step for train-val-test
+    
+        time_idx=i["time_idx"] 
+        site_idx=i["site_idx"]
+        LE_hat = self(i)
+        return LE_hat,time_idx,site_idx
+          
+    def shared_loss(self,obs,tar): #shared ra constarining factor and weight
+
+        LE_loss=F.l1_loss(obs,tar) #MSE loss
+
+        return LE_loss
+
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int)  -> torch.Tensor: 
+
+
+        LE_hat,time_idx,site_idx=self.shared_step(batch)
+
+        LE_loss= self.shared_loss(batch['LE_CORR_o'],LE_hat)
+       
+        train_loss = LE_loss
+
+
+        # Logging.
+        self.log("train_loss",train_loss,on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
+                 
+        return {"loss": train_loss,'LE_hat': LE_hat.detach(),'time_idx':time_idx.detach(),'site_idx':site_idx.detach()}
+
+
+    def training_epoch_end(self, training_step_outputs) -> None:
+
+        for var in ["LE_CORR_o"]:    
+            var_new = var +  '_pred'    
+            dummy = self.ds_train[var].copy()
+            dummy.values[:] = np.nan
+            self.ds_train[var_new]= dummy.copy()
+
+        for item in training_step_outputs:
+            LE_hat = item['LE_hat'].cpu()
+            
+            time_idx = item['time_idx'].cpu()
+            site_idx = item['site_idx'].cpu()
+
+            # Assign predictions to the right time steps.
+            self.ds_train['LE_CORR_o_pred'].values[time_idx,site_idx] = LE_hat
+
+                         
+  
+
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+
+        LE_hat,time_idx,site_idx=self.shared_step(batch)
+
+        LE_loss= self.shared_loss(batch['LE_CORR_o'],LE_hat)
+
+
+        self.log('val_loss',LE_loss,prog_bar=True, logger=True)
+
+        
+        return {'LE_hat': LE_hat,'time_idx':time_idx,'site_idx':site_idx}
+
+    def validation_epoch_end(self, validation_step_outputs) -> None:
+                
+        for var in ["LE_CORR_o"]:    
+            var_new = var +  '_pred'    
+            dummy = self.ds_val[var].copy()
+            dummy.values[:] = np.nan
+            self.ds_val[var_new]= dummy.copy()
+
+        for item in validation_step_outputs:
+            LE_hat = item['LE_hat'].cpu()
+            
+            time_idx = item['time_idx'].cpu()
+            site_idx = item['site_idx'].cpu()
+
+            # Assign predictions to the right time steps.
+            self.ds_val['LE_CORR_o_pred'].values[time_idx,site_idx] = LE_hat
+                        
+
+        return(self.ds_val)
+  
+            
+    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+        # Evaluation on test set.
+        LE_hat,time_idx,site_idx=self.shared_step(batch)
+
+        LE_loss = self.shared_loss(batch['LE_CORR_o'],LE_hat)
+  
+        self.log('test_loss', LE_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+     
+        return {'LE_hat': LE_hat,'time_idx':time_idx,'site_idx':site_idx}
+
+    def test_epoch_end(self,test_step_outputs) -> None:  
+
+        for var in ["LE_CORR_o"]:    
+            var_new = var +  '_pred'    
+            dummy = self.ds_test[var].copy()
+            dummy.values[:] = np.nan
+            self.ds_test[var_new]= dummy.copy()
+
+
+        for item in test_step_outputs:
+            LE_hat = item['LE_hat'].cpu()
+            time_idx = item['time_idx'].cpu()
+            site_idx = item['site_idx'].cpu()
+
+
+            # Assign predictions to the right time steps.
+            self.ds_test['LE_CORR_o_pred'].values[time_idx,site_idx] = LE_hat           
+
+
+        return(self.ds_test)
+
+
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+
+        optimizer= torch.optim.AdamW(self.parameters(), lr=self.hparams['learning_rate1'],weight_decay=self.hparams["weight_decay"])
+
+        return optimizer
+
