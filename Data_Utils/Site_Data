@@ -1,0 +1,51 @@
+import numpy as np
+from torch.utils.data import Dataset
+
+class SiteData(Dataset):
+    def __init__(self, ds, dtype=np.float32):
+        super().__init__()
+        
+        self.ds = ds.load()
+        self.dtype = dtype
+        #mask = np.isfinite(self.ds['LE_CORR_o'])
+        #mask = np.isfinite(self.ds['mask'])
+
+        #print(self.ds)
+
+        # Store indices of `valid` time steps.
+        #self.coords = np.argwhere(mask.values)[:, 0]
+        self.coords = np.argwhere(ds.to_array().notnull().all('variable').values)
+        #np.argwhere(ds.to_array().notnull().all('variable').values)
+        #print(self.coords.size)
+        #print(self.coords)
+
+
+
+    def __len__(self):
+        return len(self.coords)
+
+    def __getitem__(self, ind):
+        time,site = self.coords[ind]
+        d = self.ds.isel(Datetime=time,siteID=site)
+        return {
+            'WS': d['WS'].values.astype(self.dtype),
+            'VPD': d['VPD'].values.astype(self.dtype),
+            'TA': d['TA'].values.astype(self.dtype),
+            'PA': d['PA'].values.astype(self.dtype), 
+            'delta': d['delta'].values.astype(self.dtype),          
+            'NETRAD_o': d['NETRAD_o'].values.astype(self.dtype),
+            "USTAR":d['USTAR'].values.astype(self.dtype),
+            "TSurf":d['TSurf'].values.astype(self.dtype),
+            "LW_OUT":d['LW_OUT'].values.astype(self.dtype),
+            'H_CORR_o': d['H_CORR_o'].values.astype(self.dtype),
+            'G_o': d['G_o'].values.astype(self.dtype),
+            'ra': d['ra'].values.astype(self.dtype),
+            'WD':d['WD'].values.astype(self.dtype),
+            'SW_IN': d['SW_IN'].values.astype(self.dtype),
+            'SW_POT_sm': d['SW_POT_sm'].values.astype(self.dtype),
+            'rs' :d['rs'].values.astype(self.dtype),
+            'LE_CORR_o': d['LE_CORR_o'].values.astype(self.dtype),
+            'time_idx': time,
+            'site_idx':site
+
+        }
