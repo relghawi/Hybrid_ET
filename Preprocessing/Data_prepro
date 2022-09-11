@@ -1,0 +1,30 @@
+library(dplyr)
+library(RcppRoll)
+library(tibble)
+library(tidyverse)
+library(bigleaf)
+source("path/FLUXNET2.0.R")
+myFiles <- Sys.glob("path/*.csv")
+
+for (site in myFiles){
+    print(basename(site))
+    df<- read.csv(site)
+    class(df)
+    if (all(is.na(df[,'G']))==TRUE) next  ## to make sure the variables are not empty
+    if (all(is.na(df[,'WS']))==TRUE) next
+    if (all(is.na(df[,'LE_CORR']))==TRUE) next
+
+    df[is.na(df[,"PA"]),"PA"] <- mean(df[,"PA"], na.rm = TRUE) ## filling NA values with mean pressure in kPa
+
+    df<-as_tibble(df)
+
+   
+    df$VPD=df$VPD*0.1  ## kPa
+
+    df %<>% mutate(ra = bigleaf::aerodynamic.conductance( Tair = TA, pressure = PA, wind=WS, ustar = USTAR, H=H_CORR)$Ra_h)
+    df %<>%  mutate(SW_POT_sm = RcppRoll::roll_mean(x=.$SW_IN_POT, n = 480, fill=NA),
+                  SW_POT_sm_diff = 10000*c(SW_POT_sm[2]-SW_POT_sm[1], diff(SW_POT_sm)) %>% RcppRoll::roll_mean(n = 480, fill=NA)
+  )    
+  
+  write.csv(df,file= paste0('path/', basename(site)), row.names=FALSE)
+  }
