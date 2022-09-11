@@ -1,0 +1,284 @@
+"""Hybird multilayer."""
+
+
+import xarray as xr
+import numpy as np
+from sympy import *
+from argparse import ArgumentParser
+from typing import List, Dict, Tuple
+from typing import Optional
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Function
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning import Trainer, seed_everything
+from data_utils import Normalize
+from Fed3 import MultiLinear
+from scipy import stats
+
+
+
+class Hybrid(pl.LightningModule):
+    def __init__(
+            self,
+            hparams,
+            variables_rs: List[str],
+            variables_ra: List[str],
+            targets: List[str],
+            latent_rs:List[str],
+            latent_ra:List[str],
+            norm: Normalize,
+            ds_val: xr.Dataset,
+            ds_test:xr.Dataset,
+            ds_train:xr.Dataset,
+            hidden_size1,
+            hidden_size2,
+            n_hidden_layers1,
+            n_hidden_layers2,
+            dropout
+            ) -> None:
+       
+
+        super().__init__()
+        self.save_hyperparameters(
+            'hparams',
+            'variables_rs',
+            'variables_ra',
+            'targets',
+            'latent_rs',
+            'latent_ra',
+            'hidden_size1',
+            'hidden_size2',
+            'n_hidden_layers1',
+            'n_hidden_layers2',
+            'dropout'
+        )
+        
+        self.hparams.update(hparams) 
+
+        hidden_size1=self.hparams['hidden_size1']
+        n_hidden_layers1=self.hparams['n_hidden_layers1']
+        hidden_size2=self.hparams['hidden_size2']
+        n_hidden_layers2=self.hparams['n_hidden_layers2']     
+           
+        dropout=self.hparams['dropout']        
+        self.variables_rs = variables_rs
+        self.variables_ra = variables_ra
+        self.targets = targets
+        self.latent_rs=latent_rs
+        self.latent_ra=latent_ra
+        self.input_norm_rs = norm.get_normalization_layer(variables=self.variables_rs, invert=False, stack=True)
+        print(self.input_norm_rs)
+        self.input_norm_ra = norm.get_normalization_layer(variables=self.variables_ra, invert=False, stack=True)
+        print(self.input_norm_ra)
+        
+        self.nn_rs = MultiLinear(
+            num_inputs=len(self.variables_rs),
+            num_outputs=len(self.latent_rs),
+            num_hidden=hidden_size1,
+            num_layers=n_hidden_layers1,
+            dropout=dropout,
+            dropout_last=False,
+            activation=nn.ReLU(),
+            activation_last=False
+        )
+        self.nn_ra = MultiLinear(
+            num_inputs=len(self.variables_ra),
+            num_outputs=len(self.latent_ra),
+            num_hidden=hidden_size2,
+            num_layers=n_hidden_layers2,
+            dropout=dropout,
+            dropout_last=False,
+            activation=nn.ReLU(),
+            activation_last=False
+        )
+
+
+        self.latent_denorm_rs = norm.get_normalization_layer(variables=self.latent_rs, invert=True, stack=True)
+
+        self.latent_denorm_ra = norm.get_normalization_layer(variables=self.latent_ra, invert=True, stack=True)
+        
+        self.ds_val = ds_val
+        self.ds_test = ds_test
+        self.ds_train = ds_train
+
+
+
+        # for entries later generated during validation and testing
+        self.val_history = np.zeros(100000, dtype=np.float32) * np.nan
+        self.test_history = np.zeros(100000, dtype=np.float32) * np.nan
+        self.train_history = np.zeros(100000, dtype=np.float32) * np.nan
+
+
+    def forward(self, batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        z_rs = self.input_norm_rs({x: batch[x] for x in["VPD","NETRAD_o","WD","TA",'SW_IN', 'SW_POT_sm']})
+        z_ra = self.input_norm_ra({x:batch[x] for x in["WS","USTAR"]})
+  
+        z_rs = self.nn_rs(z_rs)
+        z_ra = self.nn_ra(z_ra)
+
+       # denormalization done for latent
+        
+        Rs_hat = self.latent_denorm_rs(z_rs)
+        ra_hat = self.latent_denorm_ra(z_ra)
+
+
+        Rs_hat = F.softplus(Rs_hat)
+        ra_hat = F.softplus(ra_hat)
+      
+
+        Rs_hat=Rs_hat.squeeze(1)
+        ra_hat=ra_hat.squeeze(1)
+
+        # print(torch.mean(batch["ra"]))
+
+        # Physical PM eqn.
+        cp = 1004.834 # specific heat of air for constant pressure (J K-1 kg-1)
+        eps= 0.622  # ratio of the molecular weight of water vapor to dry air (=Mw/Md)
+        k1 = 2.501
+        k2 = 0.00237
+        ld = ( k1 - k2 * batch["TA"] ) * 1e+06 #Latent heat of vaporization as a function of air temperature (J kg-1)
+        Rd= 287.0586 # gas constant of dry air (J kg-1 K-1) (Foken 2008 p. 245)
+        rhoa = (batch["PA"]*1000)/(Rd * (batch["TA"]+273.15)) # Air density(kg m-3)
+        psicst  = (cp * batch["PA"]) / (eps * ld) #psychrometric constant (kPa K-1)
+
+        LE_hat = (batch["delta"] * (batch["NETRAD_o"]-batch["G_o"]) + rhoa * cp * batch["VPD"] / ra_hat) / (( 1 + ( Rs_hat / ra_hat)) * psicst + batch["delta"])
+             
+        return Rs_hat,ra_hat,LE_hat
+
+
+
+    def shared_step(self,i): #shared step for train-val-test
+    
+        time_idx=i["time_idx"] 
+        site_idx=i["site_idx"]
+        Rs_hat,ra_hat,LE_hat = self(i)
+        return Rs_hat,ra_hat,LE_hat,time_idx,site_idx
+          
+    def shared_loss(self,obs,tar): #shared ra constarining factor and weight
+
+        LE_loss=F.l1_loss(obs,tar) #MSE loss
+
+        return LE_loss
+
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int)  -> torch.Tensor: 
+
+
+        Rs_hat,ra_hat,LE_hat,time_idx,site_idx=self.shared_step(batch)
+
+        LE_loss= self.shared_loss(batch['LE_CORR_o'],LE_hat)
+
+        train_loss = LE_loss
+
+
+        # Logging.
+        self.log("train_loss",train_loss,on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        
+        return {"loss": train_loss,'Rs_hat':Rs_hat.detach(), 'ra_hat':ra_hat.detach(),'LE_hat': LE_hat.detach(),'time_idx':time_idx.detach(),'site_idx':site_idx.detach()}
+
+    def training_epoch_end(self, training_step_outputs) -> None:
+
+        for var in ["LE_CORR_o","rs","ra"]:    
+            var_new = var +  '_pred'    
+            dummy = self.ds_train[var].copy()
+            dummy.values[:] = np.nan
+            self.ds_train[var_new]= dummy.copy()
+
+        for item in training_step_outputs:
+            LE_hat = item['LE_hat'].cpu()
+            Rs_hat = item['Rs_hat'].cpu()
+            ra_hat = item['ra_hat'].cpu()
+                    
+            time_idx = item['time_idx'].cpu()
+            site_idx = item['site_idx'].cpu()
+
+            # Assign predictions to the right time steps.
+            self.ds_train['LE_CORR_o_pred'].values[time_idx,site_idx] = LE_hat
+            self.ds_train['rs_pred'].values[time_idx,site_idx] = Rs_hat 
+            self.ds_train['ra_pred'].values[time_idx,site_idx] = ra_hat
+
+    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+
+        Rs_hat,ra_hat,LE_hat,time_idx,site_idx=self.shared_step(batch)
+
+        LE_loss= self.shared_loss(batch['LE_CORR_o'],LE_hat)
+        #print("val LE loss")
+        #val_loss = LE_loss
+        
+        val_loss =LE_loss
+
+
+        self.log('val_loss',val_loss,prog_bar=True, logger=True)
+    
+        return {'Rs_hat':Rs_hat, 'ra_hat':ra_hat,'LE_hat': LE_hat,'time_idx':time_idx,'site_idx':site_idx}
+
+    def validation_epoch_end(self, validation_step_outputs) -> None:
+        
+        for var in ["LE_CORR_o","rs","ra"]:    
+            var_new = var +  '_pred'    
+            dummy = self.ds_val[var].copy()
+            dummy.values[:] = np.nan
+            self.ds_val[var_new]= dummy.copy()
+
+        for item in validation_step_outputs:
+            LE_hat = item['LE_hat'].cpu()
+            Rs_hat = item['Rs_hat'].cpu()
+            ra_hat = item['ra_hat'].cpu()
+            time_idx = item['time_idx'].cpu()
+            site_idx = item['site_idx'].cpu()
+
+            # Assign predictions to the right time steps.
+            self.ds_val['LE_CORR_o_pred'].values[time_idx,site_idx] = LE_hat
+            self.ds_val['rs_pred'].values[time_idx,site_idx] = Rs_hat 
+            self.ds_val['ra_pred'].values[time_idx,site_idx] = ra_hat            
+
+
+        return(self.ds_val)
+  
+            
+    def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
+        # Evaluation on test set.
+        Rs_hat,ra_hat,LE_hat,time_idx,site_idx=self.shared_step(batch)
+
+        LE_loss = self.shared_loss(batch['LE_CORR_o'],LE_hat)
+        test_loss = LE_loss
+
+        self.log('test_loss', test_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+
+        return {'Rs_hat':Rs_hat,'ra_hat':ra_hat, 'LE_hat': LE_hat,'time_idx':time_idx,'site_idx':site_idx}
+
+    def test_epoch_end(self,test_step_outputs) -> None:  
+
+        for var in ["LE_CORR_o","rs","ra"]:    
+            var_new = var +  '_pred'    
+            dummy = self.ds_test[var].copy()
+            dummy.values[:] = np.nan
+            self.ds_test[var_new]= dummy.copy()
+
+
+        for item in test_step_outputs:
+            LE_hat = item['LE_hat'].cpu()
+            Rs_hat = item['Rs_hat'].cpu()
+            ra_hat = item['ra_hat'].cpu()
+            time_idx = item['time_idx'].cpu()
+            site_idx = item['site_idx'].cpu()
+
+            # Assign predictions to the right time steps.
+            self.ds_test['LE_CORR_o_pred'].values[time_idx,site_idx] = LE_hat
+            self.ds_test['rs_pred'].values[time_idx,site_idx] = Rs_hat     
+            self.ds_test['ra_pred'].values[time_idx,site_idx] = ra_hat               
+
+
+        return(self.ds_test)
+
+
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+
+        optimizer= torch.optim.AdamW(self.parameters(), lr=self.hparams['learning_rate1'],weight_decay=self.hparams["weight_decay"])
+
+        return optimizer
+
