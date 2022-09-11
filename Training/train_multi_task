@@ -1,0 +1,135 @@
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.utilities.cloud_io import load as pl_load
+from pytorch_lightning.callbacks import LearningRateMonitor
+import os
+import multiprocessing as mp
+from math import ceil
+
+from pandas import Grouper
+import seaborn as sb
+import matplotlib.pyplot as plt
+from scipy import stats
+from datetime import datetime
+from functools import reduce
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import MinMaxScaler
+import torch
+from torch import nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import TensorDataset
+import tqdm as tqdm
+
+from data_utils import Normalize  
+
+from torch import nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import TensorDataset
+import tqdm as tqdm
+import pytorch_lightning as pl
+from pytorch_lightning import Trainer
+from typing import List, Tuple, Dict, Union, Iterable
+from torch.utils.data import Dataset, DataLoader
+from torch import Tensor
+from pytorch_lightning import LightningDataModule
+import torch
+import xarray as xr
+import numpy as np
+import pandas as pd
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+import torchmetrics 
+
+from ray.tune.integration.pytorch_lightning import TuneReportCallback
+from ray.tune.integration.pytorch_lightning import TuneReportCheckpointCallback
+
+
+from DataModule import DataModule
+from Hyb_multi_task import Hybrid
+
+
+
+import easydict
+def main(args):
+    dm= DataModule(hparams=args,path="path.nc", variables=["USTAR","LW_OUT","WS","PA","G_o","delta","VPD","NETRAD_o","WD","TA",'SW_IN', 'SW_POT_sm',"ra","rs","LE_CORR_o","H_CORR_o"])
+
+    ds_pred_val = dm.target_xr('valid', varnames=["LE_CORR_o","rs","ra","H_CORR_o","TSurf"], num_epochs=args.epochs)
+    ds_pred_test = dm.target_xr('test', varnames=["LE_CORR_o","rs","ra","H_CORR_o","TSurf"],  num_epochs=args.epochs)
+    ds_pred_train = dm.target_xr('train', varnames=["LE_CORR_o","rs","ra","H_CORR_o","TSurf"],  num_epochs=args.epochs)
+
+
+    model= Hybrid(hparams= args,#variables=["USTAR","WS","PA","G_o","delta","VPD","NETRAD_o","WD","TA",'SW_IN', 'SW_POT_sm'],
+    variables_ra=["USTAR","WS"],variables_rs=["VPD","NETRAD_o","WD","TA",'SW_IN', 'SW_POT_sm'],latent_rs=["rs"],latent_ra=["ra"],
+     targets=["LE_CORR_o","H_CORR_o"],norm=dm._norm, 
+      ds_val=ds_pred_val,ds_test=ds_pred_test,ds_train=ds_pred_train,
+     hidden_size1=args.hidden_size1, hidden_size2=args.hidden_size2,
+     n_hidden_layers1=args.n_hidden_layers1,
+     n_hidden_layers2=args.n_hidden_layers2,
+     dropout=args.dropout)
+    
+    early_stop_callback = EarlyStopping(
+   monitor='val_loss',
+   min_delta=0.00,
+   patience=10,
+   verbose=True,
+   mode='min')  # mode min/max
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath='path/checkpt',
+        filename='{epoch:02d}-{val_loss:.2f}-{step}',
+        save_top_k=True,
+        verbose=True,
+        monitor='val_loss',
+        mode='min')
+        #prefix='model.ckpt')
+    
+
+    trainer = pl.Trainer(fast_dev_run= False, default_root_dir='path',
+    max_epochs=args.epochs,enable_checkpointing=True,callbacks=[early_stop_callback,checkpoint_callback] ,gpus=1,detect_anomaly=True,precision=64,track_grad_norm=2,log_every_n_steps=1)
+# Pass the datamodule as arg to trainer.fit to override model hooks 
+    trainer.fit(model, dm)
+# automatically auto-loads the best weights
+    trainer.test(dataloaders=dm.test_dataloader(),ckpt_path='best')  #dataloaders only for v 1.5.8
+
+    # Store predictions.
+    ds_validation_predictions = dm.add_scalar_record(model.ds_val, varname=["LE_CORR_o","rs","ra","H_CORR_o","TSurf"], x=model.val_history)
+    ds_test_predictions = dm.add_scalar_record(model.ds_test, varname=["LE_CORR_o","rs","ra","H_CORR_o","TSurf"], x=model.test_history)
+    ds_train_predictions = dm.add_scalar_record(model.ds_train, varname=["LE_CORR_o","rs","ra","H_CORR_o","TSurf"], x=model.train_history)
+ 
+# Save data.
+
+    save_dir_val = os.path.join(model.logger.log_dir, 'val_predictions.nc')
+    print(f'Saving validation predictions to: {save_dir_val}')
+    ds_validation_predictions.to_netcdf(save_dir_val)
+
+    save_dir_test = os.path.join(model.logger.log_dir, 'test_predictions.nc')
+    print(f'Saving test predictions to: {save_dir_test}')
+    ds_test_predictions.to_netcdf(save_dir_test)
+
+    save_dir_train = os.path.join(model.logger.log_dir, 'train_predictions.nc')
+    print(f'Saving train predictions to: {save_dir_train}')
+    ds_train_predictions.to_netcdf(save_dir_train)    
+
+
+if __name__ == '__main__':
+
+
+    args = easydict.EasyDict({
+        "learning_rate1":1e-02,
+        "weight_decay":0.0001,
+        "epochs": 2000,
+        "batch_size":1000,
+        "num_workers": 16,
+       "hidden_size1": 32, 
+       "hidden_size2":32,
+       "n_hidden_layers1":4,
+       "n_hidden_layers2":2,
+       "dropout": 0,
+       "seed":5252
+})
+# train
+
+    main(args)
+
