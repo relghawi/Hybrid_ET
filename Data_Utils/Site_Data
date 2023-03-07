@@ -7,17 +7,9 @@ class SiteData(Dataset):
         
         self.ds = ds.load()
         self.dtype = dtype
-        #mask = np.isfinite(self.ds['LE_CORR_o'])
-        #mask = np.isfinite(self.ds['mask'])
-
-        #print(self.ds)
 
         # Store indices of `valid` time steps.
-        #self.coords = np.argwhere(mask.values)[:, 0]
         self.coords = np.argwhere(ds.to_array().notnull().all('variable').values)
-        #np.argwhere(ds.to_array().notnull().all('variable').values)
-        #print(self.coords.size)
-        #print(self.coords)
 
 
 
