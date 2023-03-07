@@ -2,9 +2,9 @@
 
 ## Description
 
-This repository contains the code for a paper to be published as:
+This repository contains the code for the paper:
 
-*ElGhawi, R., Kraft, B., Reimers, C., Reichstein, M., Körner, M., Gentine, P., & Winkler, A. (2022). Hybrid modeling of evapotranspiration: Inferring stomatal and aerodynamic resistances using combined physics-based and machine learning.*
+*ElGhawi, R., Kraft, B., Reimers, C., Reichstein, M., Körner, M., Gentine, P., & Winkler, A. J. (2023). Hybrid modeling of evapotranspiration: inferring stomatal and aerodynamic resistances using combined physics-based and machine learning. Environmental Research Letters, 18(3), 034039. https://doi.org/10.1088/1748-9326/ACBBE0*
 
 The datasets used cannot be shared but all datasets are referenced in the paper. The simulated variables are available and linked in the paper.
 
@@ -26,10 +26,10 @@ Contact: relghawi@bgc-jena.mpg.de
 ## Citation
 
 ```tex
-@article{10.1002/essoar.10512258.1, author = {ElGhawi, Reda and Kraft, Basil and Reimers, Christian and Reichstein, Markus and Körner, Marco and Gentine, Pierre and Winkler, Alexander J},
+@article{10.1088/1748-9326/ACBBE0, author = {ElGhawi, Reda and Kraft, Basil and Reimers, Christian and Reichstein, Markus and Körner, Marco and Gentine, Pierre and Winkler, Alexander J},
 title = {Hybrid Modeling of Evapotranspiration: Inferring Stomatal and Aerodynamic Resistances Using Combined Physics-Based and Machine Learning}, 
-journal = {Earth and Space Science Open Archive}, pages = {31}, year = {2022}, 
-DOI = {10.1002/essoar.10512258.1}, 
-url = {https://doi.org/10.1002/essoar.10512258.1}}
+journal = {Environmental Research Letters}, year = {2023}, 
+DOI = {10.1088/1748-9326/ACBBE0}, 
+url = {https://doi.org/10.1088/1748-9326/ACBBE0}}
 ```
 
