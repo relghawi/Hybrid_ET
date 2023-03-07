@@ -25,11 +25,18 @@ Contact: relghawi@bgc-jena.mpg.de
 
 ## Citation
 
-```tex
-@article{10.1088/1748-9326/ACBBE0, author = {ElGhawi, Reda and Kraft, Basil and Reimers, Christian and Reichstein, Markus and Körner, Marco and Gentine, Pierre and Winkler, Alexander J},
-title = {Hybrid Modeling of Evapotranspiration: Inferring Stomatal and Aerodynamic Resistances Using Combined Physics-Based and Machine Learning}, 
-journal = {Environmental Research Letters}, year = {2023}, 
-DOI = {10.1088/1748-9326/ACBBE0}, 
-url = {https://doi.org/10.1088/1748-9326/ACBBE0}}
-```
-
+@article{ElGhawi2023,
+author = {ElGhawi, Reda and Kraft, Basil and Reimers, Christian and Reichstein, Markus and K{\"{o}}rner, Marco and Gentine, Pierre and Winkler, Alexander J},
+doi = {10.1088/1748-9326/ACBBE0},
+issn = {1748-9326},
+journal = {Environmental Research Letters},
+keywords = {aerodynamic resistance,evapotranspiration,hybrid modeling,machine learning,multi-task learning,physics-constrained,surface resistance},
+month = {mar},
+number = {3},
+pages = {034039},
+publisher = {IOP Publishing},
+title = {{Hybrid modeling of evapotranspiration: inferring stomatal and aerodynamic resistances using combined physics-based and machine learning}},
+url = {https://iopscience.iop.org/article/10.1088/1748-9326/acbbe0 https://iopscience.iop.org/article/10.1088/1748-9326/acbbe0/meta},
+volume = {18},
+year = {2023}
+}
