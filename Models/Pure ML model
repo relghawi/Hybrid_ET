@@ -93,8 +93,6 @@ class MLLE(pl.LightningModule):
 
         z = self.input_norm({x: batch[x] for x in["WS","G_o","VPD","NETRAD_o","WD","TA",'SW_IN','SW_POT_sm']})
 
-        #print(z_rs)
-        #print(z_ra)
   
         z = self.nn(z)
 
