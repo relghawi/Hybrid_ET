@@ -153,14 +153,11 @@ class Hybrid(pl.LightningModule):
         LW_Emis=batch["LW_OUT"]/(boltz_cst*emis)
         TSurf = torch.pow(LW_Emis,(1/4)) ## surface temperature in Kelvin
         TSurf = TSurf- 273.15 ## Ts in celcius
-        #print("Tsurf")
-        #
+
         H_hat= ((rhoa * cp) / ra_hat)*(TSurf-batch["TA"])  ## from aerodunamic laws to derive PM
 
         LE_hat = (batch["delta"] * (batch["NETRAD_o"]-batch["G_o"]) + rhoa * cp * batch["VPD"] / ra_hat) / (( 1 + ( Rs_hat / ra_hat)) * psicst + batch["delta"])
-        #LE_hat = (ra_hat*batch["delta"] * (batch["NETRAD_o"]-batch["G_o"]) + rhoa * cp * batch["VPD"]) / (ra_hat*batch["delta"] + psicst*ra_hat+psicst*Rs_hat) ### same mathematically as PM, but may be different numerically for calc of ratio by network 
-        #LE_hat = (batch["delta"] * (batch["NETRAD_o"]-batch["G_o"]) + rhoa * cp * batch["VPD"] / ra_hat) / (( 1 + Rs_hat) * psicst + batch["delta"]) 
-             
+           
         return Rs_hat,ra_hat,emis,TSurf,LE_hat,H_hat
 
 
