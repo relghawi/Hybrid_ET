@@ -162,8 +162,8 @@ class Hybrid(pl.LightningModule):
           
     def shared_loss(self,obs,tar,obsra,tarra): #shared ra constarining factor and weight
 
-        LE_loss=F.l1_loss(obs,tar) 
-        Ra_constrain= F.l1_loss(obsra,tarra)
+        LE_loss=F.l1_loss(tar,obs) 
+        Ra_constrain= F.l1_loss(tarra,obsra)
         total_loss = LE_loss + Ra_constrain/2
         return LE_loss,Ra_constrain,total_loss
 
