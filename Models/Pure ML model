@@ -122,7 +122,7 @@ class MLLE(pl.LightningModule):
           
     def shared_loss(self,obs,tar): #shared ra constarining factor and weight
 
-        LE_loss=F.l1_loss(obs,tar) #MSE loss
+        LE_loss=F.l1_loss(tar,obs) #MAE loss
 
         return LE_loss
 
