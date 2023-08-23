@@ -171,9 +171,9 @@ class Hybrid(pl.LightningModule):
           
     def shared_loss(self,obs,tar,obsH,tarH): #shared ra constarining factor and weight
 
-        LE_loss=F.l1_loss(obs,tar) #MSE loss
+        LE_loss=F.l1_loss(tar,obs) #MAE loss
 
-        H_loss=F.l1_loss(obsH,tarH)
+        H_loss=F.l1_loss(tarH,obsH)
 
         total_loss = LE_loss + H_loss
 
